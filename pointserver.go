@@ -12,9 +12,11 @@ import (
 	"github.com/paulmach/go.geojson"
 )
 
+
 type Record struct {
 	Feature *geojson.Feature
 }
+
 
 func (p Record) Coordinates() (float64, float64) {
 	if !p.Feature.Geometry.IsPoint() {
@@ -24,48 +26,100 @@ func (p Record) Coordinates() (float64, float64) {
 	return p.Feature.Geometry.Point[0], p.Feature.Geometry.Point[1]
 }
 
-func (p Record) String() string {
-	x, y := p.Coordinates()
-	return fmt.Sprintf("%f %f", x, y)
-}
 
 type BoundingBox struct {
 	MinX, MinY, MaxX, MaxY float64
 }
 
+
 func UnmarshalBoundingBox(str string) (BoundingBox, error) {
 	components := strings.Split(str, ",")
-
 	if len(components) != 4 {
-		return BoundingBox{}, errors.New("Bbox string is not 4 components long")
+		return BoundingBox{}, errors.New("bbox string is not 4 components long")
 	}
 
 	minX, err := strconv.ParseFloat(components[0], 64)
-
 	if err != nil {
 		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
 	}
 
 	minY, err := strconv.ParseFloat(components[1], 64)
-
 	if err != nil {
 		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
 	}
 
-	
 	maxX, err := strconv.ParseFloat(components[2], 64)
-
 	if err != nil {
 		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
 	}
-	
-	maxY, err := strconv.ParseFloat(components[3], 64)
 
+	maxY, err := strconv.ParseFloat(components[3], 64)
 	if err != nil {
 		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
 	}
 
 	return BoundingBox{minX, minY, maxX, maxY}, nil
+}
+
+
+func UnmarshalPoint(str string) (kdbush.Point, error) {
+	components := strings.Split(str, ",")
+
+	if len(components) != 2 {
+		return nil, errors.New("point string is not 2 components long")
+	}
+
+	x, err := strconv.ParseFloat(components[0], 64); 
+	if err != nil {
+		return nil, fmt.Errorf("Could not decode first component:", err)
+	}
+
+	y, err := strconv.ParseFloat(components[1], 64);
+	if err != nil {
+		return nil, fmt.Errorf("Could not decode second component:", err)
+	}
+
+	return &kdbush.SimplePoint{x, y}, nil
+}
+
+
+func makeJSONHandler(fn func(*http.Request) ([]byte, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		bytes, err := fn(r)
+
+		if err != nil {
+			w.WriteHeader(400)
+			fmt.Fprintf(w, "Error: %s", err)
+		} else {
+			w.Header().Add("Content-Type", "application/json; charset=utf8")
+			w.Header().Add("Content-Length", strconv.Itoa(len(bytes)))
+			w.WriteHeader(200)
+			w.Write(bytes)	
+		}
+	}
+}
+
+
+func makeFeatureCollectionHandler(fc *geojson.FeatureCollection, fn func(*http.Request) ([]int, error)) http.HandlerFunc {
+	return makeJSONHandler(func(r *http.Request) ([]byte, error) {
+		results, err := fn(r)
+		if err != nil {
+			return nil, err
+		}
+
+		rfc := geojson.NewFeatureCollection()
+
+		for _, i := range results {
+			rfc.AddFeature(fc.Features[i])
+		}
+
+		bytes, err := rfc.MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+
+		return bytes, nil
+	})
 }
 
 func main() {
@@ -98,36 +152,33 @@ func main() {
 
 	bush := kdbush.NewBush(points, 10)
 	
-	handler := func(w http.ResponseWriter, r *http.Request) {
+	featureHandler := func(r *http.Request) ([]int, error) {
 		bbox, err := UnmarshalBoundingBox(r.FormValue("bbox"))
 
 		if err != nil {
-			w.WriteHeader(400)
-			fmt.Fprintf(w, "Error: %s", err)
-			return
+			return nil, err
 		} 
 
-		results := bush.Range(bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY)
-		rfc := geojson.NewFeatureCollection()
-
-		for _, i := range results {
-			rfc.AddFeature(fc.Features[i])
-		}
-
-		bytes, err := rfc.MarshalJSON()
-
-		if err != nil {
-			w.WriteHeader(400)
-			fmt.Fprintf(w, "Error: %s", err)
-			return
-		}
-
-		w.Header().Add("Content-Type", "application/json; charset=utf8")
-		w.Header().Add("Content-Length", strconv.Itoa(len(bytes)))
-		w.WriteHeader(200)
-		w.Write(bytes)
+		return bush.Range(bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY), nil
 	}
 
-	http.HandleFunc("/", handler);
+	http.HandleFunc("/features", makeFeatureCollectionHandler(fc, featureHandler));
+
+	nearestHandler := func(r *http.Request) ([]int, error) {
+		point, err := UnmarshalPoint(r.FormValue("point"))
+		if err != nil {
+			return nil, err
+		}
+
+		radius, err := strconv.ParseFloat(r.FormValue("radius"), 10)
+		if err != nil {
+			return nil, err
+		}
+
+		return bush.Within(point, radius), nil
+	}
+
+	http.HandleFunc("/nearest", makeFeatureCollectionHandler(fc, nearestHandler));
+	
 	http.ListenAndServe(":8000", nil);
 }
