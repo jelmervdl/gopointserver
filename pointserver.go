@@ -10,11 +10,18 @@ import (
 	"net/http"
 	"github.com/MadAppGang/kdbush"
 	"github.com/paulmach/go.geojson"
+	"github.com/fsnotify/fsnotify"
 )
 
 
 type Record struct {
 	Feature *geojson.Feature
+}
+
+
+type DataSet struct {
+	FeatureCollection *geojson.FeatureCollection
+	Index *kdbush.KDBush
 }
 
 
@@ -100,9 +107,9 @@ func makeJSONHandler(fn func(*http.Request) ([]byte, error)) http.HandlerFunc {
 }
 
 
-func makeFeatureCollectionHandler(fc *geojson.FeatureCollection, fn func(*http.Request) ([]int, error)) http.HandlerFunc {
+func makeFeatureCollectionHandler(ds *DataSet, fn func(*DataSet, *http.Request) ([]int, error)) http.HandlerFunc {
 	return makeJSONHandler(func(r *http.Request) ([]byte, error) {
-		results, err := fn(r)
+		results, err := fn(ds, r)
 		if err != nil {
 			return nil, err
 		}
@@ -110,7 +117,7 @@ func makeFeatureCollectionHandler(fc *geojson.FeatureCollection, fn func(*http.R
 		rfc := geojson.NewFeatureCollection()
 
 		for _, i := range results {
-			rfc.AddFeature(fc.Features[i])
+			rfc.AddFeature(ds.GetFeature(i))
 		}
 
 		bytes, err := rfc.MarshalJSON()
@@ -122,63 +129,118 @@ func makeFeatureCollectionHandler(fc *geojson.FeatureCollection, fn func(*http.R
 	})
 }
 
-func main() {
-	fc := geojson.NewFeatureCollection()
 
-	/* Read each GeoJSON file passed as argument */
-	for _, path := range os.Args[1:] {
+func NewDataSet(paths []string) *DataSet {
+	ds := new(DataSet)
+
+	ds.FeatureCollection = geojson.NewFeatureCollection()
+
+	/* Try to load the features from each file */
+	for _, path := range paths {
 		dat, err := ioutil.ReadFile(path)
 		if err != nil {
-			panic(err)
+			fmt.Printf("Skipped %s: %s", path, err)
 		}
 
 		ffc, err := geojson.UnmarshalFeatureCollection(dat)
 		if err != nil {
-			panic(err)
+			fmt.Printf("Skipped %s: %s", path, err)
 		}
 
-		fc.Features = append(fc.Features, ffc.Features...)
+		ds.AddFeatures(ffc.Features)
 	}
 
 	/* Create the index */
+	points := make([]kdbush.Point, len(ds.FeatureCollection.Features))
 
-	points := make([]kdbush.Point, len(fc.Features))
-
-	for i, v := range fc.Features {
+	for i, v := range ds.FeatureCollection.Features {
 		points[i] = Record{v}
 	}
 
-	fmt.Printf("Building index for %d records...\n", len(points))
-
-	bush := kdbush.NewBush(points, 10)
+	ds.Index = kdbush.NewBush(points, 10)
 	
-	featureHandler := func(r *http.Request) ([]int, error) {
-		bbox, err := UnmarshalBoundingBox(r.FormValue("bbox"))
+	return ds
+}
 
-		if err != nil {
-			return nil, err
-		} 
 
-		return bush.Range(bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY), nil
+func (ds *DataSet) AddFeatures(features []*geojson.Feature) {
+	ds.FeatureCollection.Features = append(ds.FeatureCollection.Features, features...)
+}
+
+
+func (ds *DataSet) GetFeature(i int) *geojson.Feature {
+	return ds.FeatureCollection.Features[i];
+}
+
+
+func featureHandler(ds *DataSet, r *http.Request) ([]int, error) {
+	bbox, err := UnmarshalBoundingBox(r.FormValue("bbox"))
+
+	if err != nil {
+		return nil, err
+	} 
+
+	return ds.Index.Range(bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY), nil
+}
+
+func nearestHandler(ds *DataSet, r *http.Request) ([]int, error) {
+	point, err := UnmarshalPoint(r.FormValue("point"))
+	if err != nil {
+		return nil, err
 	}
 
-	http.HandleFunc("/features", makeFeatureCollectionHandler(fc, featureHandler));
-
-	nearestHandler := func(r *http.Request) ([]int, error) {
-		point, err := UnmarshalPoint(r.FormValue("point"))
-		if err != nil {
-			return nil, err
-		}
-
-		radius, err := strconv.ParseFloat(r.FormValue("radius"), 10)
-		if err != nil {
-			return nil, err
-		}
-
-		return bush.Within(point, radius), nil
+	radius, err := strconv.ParseFloat(r.FormValue("radius"), 10)
+	if err != nil {
+		return nil, err
 	}
 
-	http.HandleFunc("/nearest", makeFeatureCollectionHandler(fc, nearestHandler));
+	return ds.Index.Within(point, radius), nil
+}
+
+func main() {
+	files := make([]string, len(os.Args) - 1)
+	copy(files, os.Args[1:])
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		panic(err)
+	}
+	defer watcher.Close()
+
+	/* Read each GeoJSON file passed as argument */
+	ds := NewDataSet(files)
+
+	/* Watch files for reloading */
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case event := <-watcher.Events:
+				fmt.Println("event:", event)
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					fmt.Println("modified file:", event.Name)
+					ds = NewDataSet(files)
+					fmt.Printf("Dataset contains %d features\n", len(ds.FeatureCollection.Features))
+				}
+			case err := <-watcher.Errors:
+				fmt.Println("error:", err)
+			}
+		}
+	}()
+
+	/* Watch files */
+	for _, path := range files {
+		err = watcher.Add(path)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	http.HandleFunc("/features", makeFeatureCollectionHandler(ds, featureHandler));
+
+	http.HandleFunc("/nearest", makeFeatureCollectionHandler(ds, nearestHandler));
 	
 	http.ListenAndServe(":8000", nil);
+
+	<- done
 }
