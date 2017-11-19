@@ -8,6 +8,7 @@ import (
 	"os"
 	"io/ioutil"
 	"net/http"
+	"path/filepath"
 	"github.com/MadAppGang/kdbush"
 	"github.com/paulmach/go.geojson"
 )
@@ -143,17 +144,25 @@ func NewDataSet(paths []string) (*DataSet, error) {
 
 	/* Try to load the features from each file */
 	for _, path := range paths {
-		dat, err := ioutil.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
+		filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+			if info.IsDir() {
+				return nil
+			}
 
-		ffc, err := geojson.UnmarshalFeatureCollection(dat)
-		if err != nil {
-			return nil, err
-		}
+			dat, err := ioutil.ReadFile(path)
+			if err != nil {
+				return err
+			}
 
-		ds.AddFeatures(ffc.Features)
+			ffc, err := geojson.UnmarshalFeatureCollection(dat)
+			if err != nil {
+				return err
+			}
+
+			ds.AddFeatures(ffc.Features)
+
+			return nil
+		})
 	}
 
 	/* Create the index */
