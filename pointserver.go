@@ -52,22 +52,22 @@ func UnmarshalBoundingBox(str string) (BoundingBox, error) {
 
 	minX, err := strconv.ParseFloat(components[0], 64)
 	if err != nil {
-		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
+		return BoundingBox{}, fmt.Errorf("Could not decode first component: %s", err)
 	}
 
 	minY, err := strconv.ParseFloat(components[1], 64)
 	if err != nil {
-		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
+		return BoundingBox{}, fmt.Errorf("Could not decode first component: %s", err)
 	}
 
 	maxX, err := strconv.ParseFloat(components[2], 64)
 	if err != nil {
-		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
+		return BoundingBox{}, fmt.Errorf("Could not decode first component: %s", err)
 	}
 
 	maxY, err := strconv.ParseFloat(components[3], 64)
 	if err != nil {
-		return BoundingBox{}, fmt.Errorf("Could not decode first component:", err)
+		return BoundingBox{}, fmt.Errorf("Could not decode first component: %s", err)
 	}
 
 	return BoundingBox{minX, minY, maxX, maxY}, nil
@@ -83,12 +83,12 @@ func UnmarshalPoint(str string) (kdbush.Point, error) {
 
 	x, err := strconv.ParseFloat(components[0], 64); 
 	if err != nil {
-		return nil, fmt.Errorf("Could not decode first component:", err)
+		return nil, fmt.Errorf("Could not decode first component: %s", err)
 	}
 
 	y, err := strconv.ParseFloat(components[1], 64);
 	if err != nil {
-		return nil, fmt.Errorf("Could not decode second component:", err)
+		return nil, fmt.Errorf("Could not decode second component: %s", err)
 	}
 
 	return &kdbush.SimplePoint{x, y}, nil
@@ -144,25 +144,24 @@ func NewDataSet(paths []string) (*DataSet, error) {
 
 	/* Try to load the features from each file */
 	for _, path := range paths {
-		filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
-			if info.IsDir() {
-				return nil
-			}
+		files, err := filepath.Glob(path)
+		if err != nil {
+			return nil, fmt.Errorf("Error while searching for file pattern '%s': %s", err)
+		}
 
-			dat, err := ioutil.ReadFile(path)
+		for _, file := range files {
+			dat, err := ioutil.ReadFile(file)
 			if err != nil {
-				return err
+				return nil, fmt.Errorf("Error while trying to read %s: %s", file, err)
 			}
 
 			ffc, err := geojson.UnmarshalFeatureCollection(dat)
 			if err != nil {
-				return err
+				return nil, fmt.Errorf("Error while trying to decode %s: %s", file, err)
 			}
 
 			ds.AddFeatures(ffc.Features)
-
-			return nil
-		})
+		}
 	}
 
 	/* Create the index */
@@ -190,9 +189,8 @@ func (ds *DataSet) GetFeature(i int) *geojson.Feature {
 
 func featureHandler(ds *DataSet, r *http.Request) ([]int, error) {
 	bbox, err := UnmarshalBoundingBox(r.FormValue("bbox"))
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Could not decode bounding box: %s", err)
 	} 
 
 	return ds.Index.Range(bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY), nil
@@ -226,6 +224,8 @@ func main() {
 	}
 
 	data = ds
+
+	fmt.Printf("Serving %d features", len(data.FeatureCollection.Features))
 
 	http.HandleFunc("/features", makeFeatureCollectionHandler(featureHandler));
 

@@ -8,4 +8,4 @@ FROM scratch
 COPY --from=0 /go/src/github.com/jelmervdl/gopointserver/gopointserver .
 EXPOSE 8000
 VOLUME "/data"
-ENTRYPOINT ["./gopointserver", "/data"]
+ENTRYPOINT ["./gopointserver", "/data/*.geojson"]
